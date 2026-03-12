@@ -1,0 +1,694 @@
+================================================================================
+          COMPLETE TERRAGRUNT GUIDE — FROM ZERO TO DEPLOYED
+================================================================================
+
+Author : Suraj Kumar Singh
+Date   : March 10, 2026
+Purpose: A beginner-friendly, end-to-end explanation of how we transformed
+         a single Terraform main.tf into a modular Terragrunt project.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. What Is Terraform? (Quick Recap)
+  2. What Is Terragrunt and Why Do We Need It?
+  3. The Problem With Plain Terraform
+  4. How Terragrunt Solves These Problems
+  5. Project Folder Structure — Before vs After
+  6. Step-by-Step: What Each File Does
+     6.1  Terraform Modules (modules/ folder)
+     6.2  Root Terragrunt Config (environments/terragrunt.hcl)
+     6.3  Environment Variables (environments/dev/env.hcl)
+     6.4  Resource Terragrunt Configs (environments/dev/*/terragrunt.hcl)
+  7. Key Terragrunt Concepts Explained
+  8. Remote State — What and Why
+  9. Dependencies Between Modules
+  10. How to Run Terragrunt Commands
+  11. How to Add a New Environment (prod, staging, etc.)
+  12. Common Commands Cheat Sheet
+  13. Troubleshooting Tips
+
+
+================================================================================
+1. WHAT IS TERRAFORM? (Quick Recap)
+================================================================================
+
+Terraform is an Infrastructure as Code (IaC) tool by HashiCorp. You write
+configuration files (.tf files) that describe what cloud resources you want,
+and Terraform creates/updates/deletes them for you.
+
+Example: Instead of clicking around in the Azure Portal to create a Resource
+Group, you write:
+
+    resource "azurerm_resource_group" "my-rg" {
+      name     = "my-resources"
+      location = "East US"
+    }
+
+Then run "terraform apply" and it creates the resource group automatically.
+
+
+================================================================================
+2. WHAT IS TERRAGRUNT AND WHY DO WE NEED IT?
+================================================================================
+
+Terragrunt is a THIN WRAPPER around Terraform. It does NOT replace Terraform.
+It calls Terraform under the hood. Think of it as a "helper" that makes
+Terraform easier to manage at scale.
+
+Terragrunt was created by Gruntwork (https://gruntwork.io/).
+
+Key benefits:
+  - DRY code (Don't Repeat Yourself)
+  - Automatic remote state management
+  - Multi-environment support (dev, staging, prod) without duplicating code
+  - Dependency management between modules
+  - Auto-generates provider and backend configurations
+
+
+================================================================================
+3. THE PROBLEM WITH PLAIN TERRAFORM
+================================================================================
+
+Our ORIGINAL main.tf had everything in ONE file:
+
+    terraform {
+      required_providers {
+        azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }
+      }
+    }
+    provider "azurerm" { features {} }
+
+    resource "azurerm_resource_group" "my-rg" { ... }
+    resource "azurerm_virtual_network" "my-vnet" { ... }
+    resource "azurerm_logic_app_workflow" "my-logic-app" { ... }
+
+Problems with this approach:
+
+  1. EVERYTHING IN ONE FILE
+     - All resources are in one main.tf
+     - If something breaks, the entire state is affected
+     - Hard to manage as the project grows
+
+  2. NO ENVIRONMENT SEPARATION
+     - How do you deploy the same infra to dev AND prod?
+     - You'd have to copy-paste the entire folder and change values
+     - Copy-paste = bugs waiting to happen
+
+  3. STATE FILE IS LOCAL
+     - terraform.tfstate is on your local machine
+     - If your laptop dies, you lose track of what's deployed
+     - Team members can't collaborate
+
+  4. PROVIDER BLOCK REPEATED EVERYWHERE
+     - Every module/folder needs "provider azurerm { features {} }"
+     - Change the provider version? Update it in 20 places.
+
+  5. NO DEPENDENCY MANAGEMENT
+     - Terraform handles deps within a single state
+     - But when you split into modules, who goes first?
+
+
+================================================================================
+4. HOW TERRAGRUNT SOLVES THESE PROBLEMS
+================================================================================
+
+  Problem                     | Terragrunt Solution
+  ----------------------------|--------------------------------------------------
+  Everything in one file      | Split into reusable modules
+  No environment separation   | environments/dev/, environments/prod/ folders
+  State file is local         | remote_state block → Azure Storage backend
+  Provider repeated           | generate "provider" block → auto-generates it
+  No dependency management    | dependency block → declares what depends on what
+
+
+================================================================================
+5. PROJECT FOLDER STRUCTURE — BEFORE vs AFTER
+================================================================================
+
+BEFORE (Plain Terraform):
+─────────────────────────
+    Terraform/
+    ├── main.tf                 ← Everything in one file
+    ├── terraform.tfstate       ← State stored locally (dangerous!)
+    └── terraform.tfstate.backup
+
+
+AFTER (Terragrunt):
+───────────────────
+    Terraform/
+    │
+    ├── modules/                          ← REUSABLE Terraform modules
+    │   ├── resource-group/
+    │   │   ├── main.tf                   ← Resource definition
+    │   │   ├── variables.tf              ← Input variables
+    │   │   └── outputs.tf                ← Output values
+    │   ├── virtual-network/
+    │   │   ├── main.tf
+    │   │   ├── variables.tf
+    │   │   └── outputs.tf
+    │   └── logic-app/
+    │       ├── main.tf
+    │       ├── variables.tf
+    │       └── outputs.tf
+    │
+    └── environments/                     ← ENVIRONMENT-SPECIFIC configs
+        ├── terragrunt.hcl                ← ROOT config (shared by ALL envs)
+        └── dev/
+            ├── env.hcl                   ← Dev-specific variables
+            ├── resource-group/
+            │   └── terragrunt.hcl        ← Wires module + passes inputs
+            ├── virtual-network/
+            │   └── terragrunt.hcl        ← Wires module + declares dependency
+            └── logic-app/
+                └── terragrunt.hcl        ← Wires module + declares dependency
+
+KEY INSIGHT:
+  - "modules/" = WHAT to create (the Terraform code)
+  - "environments/" = WHERE and HOW to create it (the Terragrunt wiring)
+
+
+================================================================================
+6. STEP-BY-STEP: WHAT EACH FILE DOES
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+6.1  TERRAFORM MODULES (modules/ folder)
+────────────────────────────────────────────────────────────────────────────────
+
+Each module has 3 files:
+
+  main.tf       → The actual resource definition
+  variables.tf  → Input variables (what values the module needs)
+  outputs.tf    → Output values (what the module exposes to others)
+
+>>> modules/resource-group/main.tf <<<
+
+    terraform {
+      required_providers {
+        azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }
+      }
+    }
+
+    resource "azurerm_resource_group" "this" {
+      name     = var.resource_group_name    ← Comes from variables.tf
+      location = var.location               ← Comes from variables.tf
+      tags     = var.tags                   ← Comes from variables.tf
+    }
+
+  EXPLANATION:
+  - We use "var.xyz" instead of hardcoded values
+  - This makes the module REUSABLE — same code for dev, prod, staging
+  - The actual values are passed in via Terragrunt's "inputs" block
+
+>>> modules/resource-group/variables.tf <<<
+
+    variable "resource_group_name" {
+      type = string
+    }
+    variable "location" {
+      type = string
+    }
+    variable "tags" {
+      type    = map(string)
+      default = {}
+    }
+
+  EXPLANATION:
+  - These are the "parameters" the module accepts
+  - Terragrunt fills these in via the "inputs = { ... }" block
+
+>>> modules/resource-group/outputs.tf <<<
+
+    output "resource_group_name" {
+      value = azurerm_resource_group.this.name
+    }
+    output "resource_group_location" {
+      value = azurerm_resource_group.this.location
+    }
+
+  EXPLANATION:
+  - Outputs are VALUES that other modules can READ
+  - The VNet module needs the resource group name → it reads this output
+  - Terragrunt's "dependency" block makes this connection
+
+The same pattern applies to virtual-network and logic-app modules.
+
+
+────────────────────────────────────────────────────────────────────────────────
+6.2  ROOT TERRAGRUNT CONFIG (environments/terragrunt.hcl)
+────────────────────────────────────────────────────────────────────────────────
+
+This is the PARENT config. Every child terragrunt.hcl inherits from it.
+
+>>> environments/terragrunt.hcl <<<
+
+    remote_state {
+      backend = "azurerm"
+      config = {
+        resource_group_name  = "terraform-state-rg"
+        storage_account_name = "tfstatestrssing193"
+        container_name       = "tfstate"
+        key = "${path_relative_to_include()}/terraform.tfstate"
+      }
+      generate = {
+        path      = "backend.tf"
+        if_exists = "overwrite_terragrunt"
+      }
+    }
+
+    generate "provider" {
+      path      = "provider.tf"
+      if_exists = "overwrite_terragrunt"
+      contents  = <<EOF
+    provider "azurerm" {
+      features {}
+    }
+    EOF
+    }
+
+  EXPLANATION — remote_state:
+  ─────────────────────────────
+  - Stores Terraform state in Azure Blob Storage (not locally!)
+  - "key" uses the folder path to create UNIQUE state files:
+      dev/resource-group    → key = "dev/resource-group/terraform.tfstate"
+      dev/virtual-network   → key = "dev/virtual-network/terraform.tfstate"
+      dev/logic-app         → key = "dev/logic-app/terraform.tfstate"
+  - "generate" auto-creates a backend.tf file in each module directory
+
+  EXPLANATION — generate "provider":
+  ────────────────────────────────────
+  - Auto-generates a provider.tf file in each module directory
+  - You write the provider config ONCE here
+  - Every child module gets it automatically
+  - This is the DRY (Don't Repeat Yourself) benefit!
+
+
+────────────────────────────────────────────────────────────────────────────────
+6.3  ENVIRONMENT VARIABLES (environments/dev/env.hcl)
+────────────────────────────────────────────────────────────────────────────────
+
+>>> environments/dev/env.hcl <<<
+
+    locals {
+      environment = "dev"
+      location    = "East US"
+      tags = {
+        environment = "dev"
+        managed_by  = "terragrunt"
+      }
+    }
+
+  EXPLANATION:
+  - Contains values SPECIFIC to the dev environment
+  - All resources in dev/ read from this ONE file
+  - To create prod, copy this file and change the values:
+      environment = "prod"
+      location    = "West US"
+  - Avoids repeating "East US" and tags in every single module
+
+
+────────────────────────────────────────────────────────────────────────────────
+6.4  RESOURCE TERRAGRUNT CONFIGS (environments/dev/*/terragrunt.hcl)
+────────────────────────────────────────────────────────────────────────────────
+
+Each resource folder has a terragrunt.hcl that does 4 things:
+
+  1. INCLUDE root config    → Gets remote state + provider
+  2. LOAD env variables     → Gets location, tags from env.hcl
+  3. POINT to module source → Which Terraform module to use
+  4. PASS inputs            → Fill in the module's variables
+
+>>> environments/dev/resource-group/terragrunt.hcl <<<
+
+    # 1. INCLUDE — inherit from environments/terragrunt.hcl
+    include "root" {
+      path = find_in_parent_folders()
+    }
+
+    # 2. LOAD — read environment variables from env.hcl
+    locals {
+      env_vars = read_terragrunt_config(find_in_parent_folders("env.hcl"))
+    }
+
+    # 3. SOURCE — point to the Terraform module
+    terraform {
+      source = "../../../modules/resource-group"
+    }
+
+    # 4. INPUTS — pass values to the module's variables
+    inputs = {
+      resource_group_name = "my-resources"
+      location            = local.env_vars.locals.location    ← "East US"
+      tags                = local.env_vars.locals.tags        ← from env.hcl
+    }
+
+
+>>> environments/dev/virtual-network/terragrunt.hcl <<<
+
+    include "root" {
+      path = find_in_parent_folders()
+    }
+
+    locals {
+      env_vars = read_terragrunt_config(find_in_parent_folders("env.hcl"))
+    }
+
+    terraform {
+      source = "../../../modules/virtual-network"
+    }
+
+    # NEW: DEPENDENCY — VNet needs Resource Group to exist first!
+    dependency "resource_group" {
+      config_path = "../resource-group"
+      mock_outputs = {
+        resource_group_name     = "mock-rg"
+        resource_group_location = "East US"
+      }
+    }
+
+    inputs = {
+      vnet_name           = "my-vnet"
+      address_space       = ["10.0.0.0/16"]
+      # These come FROM the resource-group module's OUTPUTS:
+      location            = dependency.resource_group.outputs.resource_group_location
+      resource_group_name = dependency.resource_group.outputs.resource_group_name
+      tags                = local.env_vars.locals.tags
+    }
+
+  EXPLANATION — dependency block:
+  ─────────────────────────────────
+  - "config_path" points to the resource-group folder
+  - Terragrunt will APPLY resource-group FIRST, then VNet
+  - "dependency.resource_group.outputs.xyz" reads the OUTPUT values
+  - "mock_outputs" are fake values used during "terragrunt validate"
+    (because resource-group hasn't been applied yet during validation)
+
+The logic-app/terragrunt.hcl follows the EXACT same pattern as virtual-network.
+
+
+================================================================================
+7. KEY TERRAGRUNT CONCEPTS EXPLAINED
+================================================================================
+
+CONCEPT: include "root"
+───────────────────────
+    include "root" {
+      path = find_in_parent_folders()
+    }
+
+  What it does:
+  - "find_in_parent_folders()" walks UP the directory tree
+  - It looks for the NEAREST terragrunt.hcl in a parent folder
+  - It finds: environments/terragrunt.hcl
+  - All config from that file is INHERITED (remote state, provider)
+
+  Think of it like: "Hey, go find my parent config and include everything."
+
+
+CONCEPT: read_terragrunt_config()
+─────────────────────────────────
+    locals {
+      env_vars = read_terragrunt_config(find_in_parent_folders("env.hcl"))
+    }
+
+  What it does:
+  - "find_in_parent_folders("env.hcl")" walks UP to find env.hcl
+  - "read_terragrunt_config()" reads and parses that file
+  - Now you can use: local.env_vars.locals.location → "East US"
+
+  Think of it like: "Read the environment file and give me its variables."
+
+
+CONCEPT: terraform { source }
+─────────────────────────────
+    terraform {
+      source = "../../../modules/resource-group"
+    }
+
+  What it does:
+  - Points to the ACTUAL Terraform module code
+  - Path is RELATIVE to this terragrunt.hcl file's location
+  - From environments/dev/resource-group/ → go up 3 levels → modules/resource-group/
+
+  Think of it like: "Use this Terraform module as the blueprint."
+
+
+CONCEPT: inputs
+───────────────
+    inputs = {
+      resource_group_name = "my-resources"
+      location            = local.env_vars.locals.location
+    }
+
+  What it does:
+  - Passes values INTO the Terraform module
+  - Maps directly to the module's variables.tf variables
+  - "resource_group_name" in inputs → var.resource_group_name in the module
+
+  Think of it like: "Fill in the blanks in the module with these values."
+
+
+CONCEPT: dependency
+───────────────────
+    dependency "resource_group" {
+      config_path = "../resource-group"
+      mock_outputs = { ... }
+    }
+
+  What it does:
+  - Declares that THIS module depends on ANOTHER module
+  - Terragrunt ensures the dependency is applied FIRST
+  - You can read the dependency's outputs:
+      dependency.resource_group.outputs.resource_group_name
+  - mock_outputs provide fake values for validate/plan when dep isn't applied yet
+
+  Think of it like: "I need the resource group to exist before I can be created."
+
+
+================================================================================
+8. REMOTE STATE — WHAT AND WHY
+================================================================================
+
+WHAT IS STATE?
+  - Terraform keeps track of what resources it created in a "state file"
+  - This file (terraform.tfstate) is a JSON map of your infrastructure
+  - Without it, Terraform doesn't know what exists and what doesn't
+
+WHY REMOTE STATE?
+  - Local state (on your laptop) is dangerous:
+      → Laptop crashes = state lost = Terraform thinks nothing exists
+      → Team members can't see each other's state
+      → Risk of two people running Terraform at the same time (state corruption)
+
+  - Remote state (in Azure Storage) is safe:
+      → Stored in the cloud, backed up automatically
+      → All team members share the same state
+      → Supports "locking" so only one person can modify at a time
+
+WHAT WE CREATED:
+  - Resource Group:   terraform-state-rg
+  - Storage Account:  tfstatestrssing193
+  - Blob Container:   tfstate
+
+  Each module gets its own state file inside this container:
+    tfstate/
+    ├── dev/resource-group/terraform.tfstate
+    ├── dev/virtual-network/terraform.tfstate
+    └── dev/logic-app/terraform.tfstate
+
+
+================================================================================
+9. DEPENDENCIES BETWEEN MODULES
+================================================================================
+
+Our dependency chain looks like this:
+
+    resource-group (NO dependencies — created FIRST)
+         │
+         ├──── virtual-network (DEPENDS ON resource-group)
+         │
+         └──── logic-app (DEPENDS ON resource-group)
+
+When you run "terragrunt run-all apply":
+  1. Terragrunt sees the dependency graph
+  2. It creates resource-group FIRST
+  3. Then it creates virtual-network AND logic-app IN PARALLEL
+     (because they both only depend on resource-group, not each other)
+
+When you run "terragrunt run-all destroy":
+  1. It destroys virtual-network and logic-app FIRST (in parallel)
+  2. Then it destroys resource-group LAST
+
+This is automatic! You don't need to worry about ordering.
+
+
+================================================================================
+10. HOW TO RUN TERRAGRUNT COMMANDS
+================================================================================
+
+IMPORTANT: Make sure Terraform and Terragrunt are in your PATH:
+
+    $env:PATH = "$env:USERPROFILE\bin;C:\Program Files\Terraform;$env:PATH"
+
+─── SINGLE MODULE ──────────────────────────────────────────────────────────────
+
+Navigate to a specific module folder and run:
+
+    cd environments\dev\resource-group
+
+    terragrunt init        → Download providers & initialize backend
+    terragrunt validate    → Check if the configuration is valid
+    terragrunt plan        → Preview what will be created/changed/destroyed
+    terragrunt apply       → Actually create/modify the resources
+    terragrunt destroy     → Delete the resources
+    terragrunt output      → Show the output values
+
+─── ALL MODULES AT ONCE ────────────────────────────────────────────────────────
+
+Navigate to the environment folder and use "run-all":
+
+    cd environments\dev
+
+    terragrunt run-all init       → Initialize ALL modules
+    terragrunt run-all validate   → Validate ALL modules
+    terragrunt run-all plan       → Preview ALL changes
+    terragrunt run-all apply      → Apply ALL modules (in dependency order!)
+    terragrunt run-all destroy    → Destroy ALL modules (in reverse order!)
+
+"run-all" automatically:
+  - Discovers all terragrunt.hcl files in subdirectories
+  - Reads the dependency graph
+  - Executes in the correct order
+  - Runs independent modules in parallel for speed
+
+
+================================================================================
+11. HOW TO ADD A NEW ENVIRONMENT (e.g., prod)
+================================================================================
+
+This is where Terragrunt really shines. To add a "prod" environment:
+
+STEP 1: Copy the dev folder
+    Copy environments/dev/ → environments/prod/
+
+STEP 2: Edit environments/prod/env.hcl
+    Change the values:
+        locals {
+          environment = "prod"
+          location    = "West US"
+          tags = {
+            environment = "prod"
+            managed_by  = "terragrunt"
+          }
+        }
+
+STEP 3: Update resource names in each terragrunt.hcl (optional)
+    In environments/prod/resource-group/terragrunt.hcl:
+        inputs = {
+          resource_group_name = "prod-resources"    ← Changed from "my-resources"
+          ...
+        }
+
+    In environments/prod/virtual-network/terragrunt.hcl:
+        inputs = {
+          vnet_name = "prod-vnet"                   ← Changed from "my-vnet"
+          ...
+        }
+
+    In environments/prod/logic-app/terragrunt.hcl:
+        inputs = {
+          logic_app_name = "prod-logic-app"         ← Changed from "my-logic-app"
+          ...
+        }
+
+STEP 4: Deploy!
+    cd environments\prod
+    terragrunt run-all apply
+
+That's it! ZERO changes to the modules/ folder. The same Terraform code is
+reused across all environments.
+
+Final structure:
+    environments/
+    ├── terragrunt.hcl             ← Shared (used by ALL environments)
+    ├── dev/
+    │   ├── env.hcl                ← Dev settings
+    │   ├── resource-group/
+    │   ├── virtual-network/
+    │   └── logic-app/
+    └── prod/                      ← NEW! Same structure, different values
+        ├── env.hcl                ← Prod settings
+        ├── resource-group/
+        ├── virtual-network/
+        └── logic-app/
+
+
+================================================================================
+12. COMMON COMMANDS CHEAT SHEET
+================================================================================
+
+  Command                          │ What It Does
+  ─────────────────────────────────┼─────────────────────────────────────────
+  terragrunt init                  │ Initialize the module (download providers)
+  terragrunt plan                  │ Preview changes without applying
+  terragrunt apply                 │ Create/update the resources
+  terragrunt destroy               │ Delete the resources
+  terragrunt validate              │ Check config syntax is valid
+  terragrunt output                │ Show output values from the state
+  terragrunt run-all plan          │ Preview ALL modules in current dir
+  terragrunt run-all apply         │ Apply ALL modules (dependency order)
+  terragrunt run-all destroy       │ Destroy ALL modules (reverse order)
+  terragrunt run-all init          │ Initialize ALL modules
+  terragrunt graph-dependencies    │ Show dependency graph
+  terragrunt --version             │ Show Terragrunt version
+
+
+================================================================================
+13. TROUBLESHOOTING TIPS
+================================================================================
+
+ERROR: "terraform: executable file not found"
+  → Terraform is not in your PATH
+  → Fix: $env:PATH = "C:\Program Files\Terraform;$env:PATH"
+
+ERROR: "Resource group could not be found" (during init)
+  → The Azure Storage backend doesn't exist yet
+  → Fix: Create the storage account first (see Section 8)
+
+WARNING: "mock outputs provided and returning those"
+  → This is NORMAL during validate/plan
+  → It means the dependency hasn't been applied yet
+  → Terragrunt uses the mock_outputs you defined
+  → After "apply", it uses real outputs instead
+
+ERROR: "Backend configuration changed"
+  → Run: terragrunt init -reconfigure
+
+ERROR: "State lock"
+  → Someone else is running Terraform, OR a previous run crashed
+  → Fix: terragrunt force-unlock <LOCK_ID>
+
+TIP: To see what Terragrunt is doing under the hood:
+  → terragrunt plan --terragrunt-log-level debug
+
+
+================================================================================
+                           END OF GUIDE
+================================================================================
+
+RECAP — The Flow:
+─────────────────
+  1. You write Terraform MODULES (reusable blueprints)
+  2. You write Terragrunt CONFIGS (environment-specific wiring)
+  3. Terragrunt reads the configs, generates backend.tf + provider.tf
+  4. Terragrunt calls Terraform with your inputs
+  5. Terraform creates the actual Azure resources
+  6. State is stored safely in Azure Blob Storage
+
+  modules/         = WHAT to build (Terraform code)
+  environments/    = WHERE to build it (Terragrunt config)
+  terragrunt.hcl   = HOW to build it (shared settings)
+
+================================================================================
