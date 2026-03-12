@@ -1,0 +1,72 @@
+name: "Terragrunt Plan"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'modules/**'
+      - 'environments/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+jobs:
+  plan:
+    name: "Terragrunt Plan - Dev"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: environments/dev
+
+    steps:
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "Setup Terraform"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+          terraform_wrapper: false
+
+      - name: "Setup Terragrunt"
+        uses: autero1/action-terragrunt@v3
+        with:
+          terragrunt-version: "0.68.9"
+
+      - name: "Terragrunt Init"
+        run: terragrunt run-all init --terragrunt-non-interactive
+
+      - name: "Terragrunt Validate"
+        run: terragrunt run-all validate --terragrunt-non-interactive
+
+      - name: "Terragrunt Plan"
+        id: plan
+        run: terragrunt run-all plan --terragrunt-non-interactive -no-color 2>&1 | tee plan_output.txt
+        continue-on-error: true
+
+      - name: "Post Plan to PR"
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('environments/dev/plan_output.txt', 'utf8');
+            const maxLength = 60000;
+            const truncated = planOutput.length > maxLength
+              ? planOutput.substring(0, maxLength) + '\n\n... (truncated)'
+              : planOutput;
+            const body = `## 📋 Terragrunt Plan Output (Dev)\n\n\`\`\`\n${truncated}\n\`\`\`\n\n**Plan Status:** ${{ steps.plan.outcome == 'success' && '✅ Success' || '❌ Failed' }}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

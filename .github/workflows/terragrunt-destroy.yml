@@ -1,0 +1,62 @@
+name: "Terragrunt Destroy"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which environment to destroy?"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      confirm:
+        description: "Type DESTROY to confirm"
+        required: true
+        type: string
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+jobs:
+  destroy:
+    name: "Terragrunt Destroy - ${{ github.event.inputs.environment }}"
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'DESTROY'
+    defaults:
+      run:
+        working-directory: environments/${{ github.event.inputs.environment }}
+
+    steps:
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "Setup Terraform"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+          terraform_wrapper: false
+
+      - name: "Setup Terragrunt"
+        uses: autero1/action-terragrunt@v3
+        with:
+          terragrunt-version: "0.68.9"
+
+      - name: "Terragrunt Init"
+        run: terragrunt run-all init --terragrunt-non-interactive
+
+      - name: "Terragrunt Destroy"
+        run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
+
+  reject:
+    name: "Destroy Rejected"
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm != 'DESTROY'
+    steps:
+      - name: "Rejected"
+        run: |
+          echo "Destroy NOT confirmed. You typed: '${{ github.event.inputs.confirm }}'"
+          exit 1
